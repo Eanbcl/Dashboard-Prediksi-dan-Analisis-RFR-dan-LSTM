@@ -246,12 +246,11 @@ with st.sidebar:
     emiten_configs = []
     
     if data_source == "Database Skripsi (ICBP, INDF, dkk)":
-        selected_emitens = st.multiselect("Pilih Emiten untuk Dianalisis/Bandingkan:", 
-                                          ["Bandingkan 5 Emiten Skripsi", "ICBP", "INDF", "MYOR", "CMRY", "ULTJ"], default=["ICBP"])
-        if "Bandingkan 5 Emiten Skripsi" in selected_emitens:
-            target_list = ["ICBP", "INDF", "MYOR", "CMRY", "ULTJ"]
-        else:
-            target_list = selected_emitens
+        target_list = st.multiselect(
+            "Pilih Emiten untuk Dianalisis/Bandingkan:", 
+            ["ICBP", "INDF", "MYOR", "CMRY", "ULTJ"], 
+            default=["ICBP"]
+        )
             
         for ticker in target_list:
             emiten_configs.append({
@@ -267,8 +266,8 @@ with st.sidebar:
         tech_template = "Date,Open,High,Low,Close,Volume\n2024-01-01,1000,1050,990,1020,50000\n2024-01-02,1020,1060,1010,1050,60000\n"
         fund_template = "Indikator;Q1 2024\nPE Ratio;15.5\nReturn on Equity;12.5\nReturn on Assets;5.2\nInterest Coverage;4.1\n"
         
-        st.download_button("📥 Unduh Template Teknikal (CSV)", data=tech_template, file_name="template_teknikal.csv", mime="text/csv", help="Format riwayat harga saham harian.")
-        st.download_button("📥 Unduh Template Fundamental (CSV)", data=fund_template, file_name="template_fundamental.csv", mime="text/csv", help="Format indikator fundamental (pemisah titik koma).")
+        st.download_button("Unduh Template Teknikal (CSV)", data=tech_template, file_name="template_teknikal.csv", mime="text/csv", help="Format riwayat harga saham harian.")
+        st.download_button("Unduh Template Fundamental (CSV)", data=fund_template, file_name="template_fundamental.csv", mime="text/csv", help="Format indikator fundamental (pemisah titik koma).")
         
         num_custom = st.number_input("Jumlah Emiten Custom:", min_value=1, max_value=5, value=1)
         for i in range(int(num_custom)):
@@ -292,10 +291,10 @@ with st.sidebar:
 
 # --- TABEL EVALUASI SKRIPSI (HANYA MUNCUL DI MODE DATABASE) ---
 if data_source == "Database Skripsi (ICBP, INDF, dkk)":
-    with st.expander("📊 Tabel Rekapitulasi Hasil Prediksi & Evaluasi Skripsi (Asli)"):
+    with st.expander("Tabel Rekapitulasi Hasil Prediksi & Evaluasi Skripsi (Asli)"):
         try:
-            eval_df = pd.read_csv(os.path.join("Model", "ringkasan_evaluasi.csv"))
-            # Formatting numeric columns for better readability
+            eval_path = os.path.join("Model", "ringkasan_evaluasi.csv")
+            eval_df = pd.read_csv(eval_path)
             format_dict = {
                 'Harga Terakhir (Rp)': 'Rp {:,.2f}',
                 'Prediksi +1 Hari RFR': 'Rp {:,.2f}',
@@ -313,7 +312,7 @@ if data_source == "Database Skripsi (ICBP, INDF, dkk)":
             }
             st.dataframe(eval_df.style.format(format_dict))
         except Exception:
-            st.error("File ringkasan_evaluasi.csv tidak ditemukan di direktori lokal.")
+            st.error("File ringkasan_evaluasi.csv tidak ditemukan di direktori Model.")
 
 # --- FUNGSI PROSES EMITEN ---
 @st.cache_data(show_spinner=False)
@@ -367,6 +366,8 @@ def process_emiten(config, model_choice, lookback, forecast_days):
         if rfr_model is not None:
             rfr_pred = rfr_model.predict(X_test_rfr)
             pred_close = prev_close_test * (1 + rfr_pred)
+            rfr_metrics['mae_ret'] = mean_absolute_error(y_test, rfr_pred)
+            rfr_metrics['rmse_ret'] = np.sqrt(mean_squared_error(y_test, rfr_pred))
             rfr_metrics['mae_rp'] = mean_absolute_error(actual_close_test, pred_close)
             rfr_metrics['mae_pct'] = rfr_metrics['mae_rp'] / np.mean(actual_close_test)
             rfr_metrics['rmse_rp'] = np.sqrt(mean_squared_error(actual_close_test, pred_close))
@@ -374,6 +375,8 @@ def process_emiten(config, model_choice, lookback, forecast_days):
         if lstm_model is not None:
             lstm_pred = lstm_model.predict(X_test, verbose=0).flatten()
             pred_close = prev_close_test * (1 + lstm_pred)
+            lstm_metrics['mae_ret'] = mean_absolute_error(y_test, lstm_pred)
+            lstm_metrics['rmse_ret'] = np.sqrt(mean_squared_error(y_test, lstm_pred))
             lstm_metrics['mae_rp'] = mean_absolute_error(actual_close_test, pred_close)
             lstm_metrics['mae_pct'] = lstm_metrics['mae_rp'] / np.mean(actual_close_test)
             lstm_metrics['rmse_rp'] = np.sqrt(mean_squared_error(actual_close_test, pred_close))
@@ -401,7 +404,7 @@ def process_emiten(config, model_choice, lookback, forecast_days):
 # --- EKSEKUSI PROSES MAIN ---
 if run_button:
     if len(emiten_configs) == 0:
-        st.warning("Silakan pilih emiten dari database atau unggah file custom terlebih dahulu.")
+        st.warning("Silakan pilih emiten dari panel di sebelah kiri dan klik 'Jalankan Analisis'.")
     else:
         results = []
         with st.spinner("Memproses data komparasi..."):
@@ -457,9 +460,31 @@ if run_button:
                 })
             st.table(pd.DataFrame(fund_summary))
             
+            # TAMBAHAN VISUALISASI GRAFIK FUNDAMENTAL
+            st.markdown("**Grafik Visualisasi Indikator Fundamental**")
+            fund_viz_df = pd.DataFrame({
+                'Emiten': [r['name'] for r in results],
+                'PER (x)': [r['fund'].get('PER', 0) for r in results],
+                'ROE (%)': [r['fund'].get('ROE', 0) * 100 for r in results],
+                'ROA (%)': [r['fund'].get('ROA', 0) * 100 for r in results],
+                'Interest Coverage (x)': [r['fund'].get('Interest Coverage', 0) for r in results]
+            }).set_index('Emiten')
+            
+            col_viz1, col_viz2 = st.columns(2)
+            with col_viz1:
+                st.write("Valuasi: Price to Earning Ratio (PER)")
+                st.bar_chart(fund_viz_df['PER (x)'])
+                st.write("Kesehatan Kas: Interest Coverage Ratio")
+                st.bar_chart(fund_viz_df['Interest Coverage (x)'])
+            with col_viz2:
+                st.write("Profitabilitas: Return on Equity (ROE)")
+                st.bar_chart(fund_viz_df['ROE (%)'])
+                st.write("Profitabilitas: Return on Assets (ROA)")
+                st.bar_chart(fund_viz_df['ROA (%)'])
+            
             # FITUR VIEWER DATA MENTAH (HANYA MUNCUL DI MODE DATABASE)
             if data_source == "Database Skripsi (ICBP, INDF, dkk)":
-                with st.expander("📂 Lihat Data Mentah & Histori Fundamental"):
+                with st.expander("Lihat Data Mentah & Histori Fundamental"):
                     for res in results:
                         try:
                             fund_path = os.path.join("data fundamental", f"Fundamental_{res['name']}.csv")
@@ -472,7 +497,7 @@ if run_button:
                             
             st.markdown("---")
 
-            # 3. METRIK EVALUASI DAN KARTU SKOR TEKNIKAL
+            # 3. METRIK EVALUASI DAN KARTU SKOR
             st.subheader("Rincian Metrik Prediksi & Evaluasi")
             for res in results:
                 st.markdown(f"### Emiten: {res['name']}")
@@ -480,7 +505,9 @@ if run_button:
                 
                 with col_skor:
                     t_lbl = get_label(res['tech_score'])
+                    f_lbl = get_label(res['fund_score'])
                     st.metric("Skor Teknikal", f"{res['tech_score']}/100", f"Status: {t_lbl}")
+                    st.metric("Skor Fundamental", f"{res['fund_score']}/100", f"Status: {f_lbl}")
                     st.metric("Harga Terakhir", f"Rp {res['last_price']:,.0f}")
                     
                 with col_metrik:
@@ -488,15 +515,19 @@ if run_button:
                     if res['rfr_metrics']:
                         eval_data.append({
                             "Algoritma": "RFR",
-                            "MAE (Rp)": f"Rp {res['rfr_metrics']['mae_rp']:,.2f}",
-                            "RMSE (Rp)": f"Rp {res['rfr_metrics']['rmse_rp']:,.2f}",
+                            "MAE": f"{res['rfr_metrics'].get('mae_ret', 0):.5f}",
+                            "RMSE": f"{res['rfr_metrics'].get('rmse_ret', 0):.5f}",
+                            "MAE Rp": f"Rp {res['rfr_metrics']['mae_rp']:,.2f}",
+                            "RMSE Rp": f"Rp {res['rfr_metrics']['rmse_rp']:,.2f}",
                             f"Prediksi +{forecast_days}H": f"Rp {res['forecast_rfr'][-1]:,.0f}"
                         })
                     if res['lstm_metrics']:
                         eval_data.append({
                             "Algoritma": "LSTM",
-                            "MAE (Rp)": f"Rp {res['lstm_metrics']['mae_rp']:,.2f}",
-                            "RMSE (Rp)": f"Rp {res['lstm_metrics']['rmse_rp']:,.2f}",
+                            "MAE": f"{res['lstm_metrics'].get('mae_ret', 0):.5f}",
+                            "RMSE": f"{res['lstm_metrics'].get('rmse_ret', 0):.5f}",
+                            "MAE Rp": f"Rp {res['lstm_metrics']['mae_rp']:,.2f}",
+                            "RMSE Rp": f"Rp {res['lstm_metrics']['rmse_rp']:,.2f}",
                             f"Prediksi +{forecast_days}H": f"Rp {res['forecast_lstm'][-1]:,.0f}"
                         })
                     st.write("**Evaluasi Akurasi Prediksi:**")
@@ -533,7 +564,7 @@ if run_button:
 
             st.info(conclusion)
             st.download_button(
-                label="📥 Unduh Hasil Kesimpulan (TXT)",
+                label="Unduh Hasil Kesimpulan (TXT)",
                 data=txt_conclusion,
                 file_name="Kesimpulan.txt",
                 mime="text/plain",
