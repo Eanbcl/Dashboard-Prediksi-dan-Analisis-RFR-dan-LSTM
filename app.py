@@ -1,6 +1,5 @@
 import os
 import csv
-import io
 import joblib
 import numpy as np
 import pandas as pd
@@ -18,6 +17,9 @@ from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
+# ==========================================
+# KONFIGURASI
+# ==========================================
 st.set_page_config(
     page_title="Dashboard Prediksi & Analisis Saham",
     layout="wide",
@@ -27,6 +29,9 @@ st.set_page_config(
 np.random.seed(42)
 tf.random.set_seed(42)
 
+# ==========================================
+# FUNGSI TEKNIKAL & DATA
+# ==========================================
 def compute_technical_indicators(df):
     df['X1_Close_Return'] = df['Close'].pct_change()
     df['X2_Volume_Return'] = df['Volume'].pct_change()
@@ -114,7 +119,7 @@ def load_and_preprocess_source(source):
     return compute_technical_indicators(df)
 
 def get_latest_valid_number(row_series):
-    for val in row_series.values[1:]:
+    for val in row_series.values[1:]: 
         v_str = str(val).strip().replace('%', '').replace(',', '')
         if v_str.lower() not in ['n/a', 'nan', 'none', '']:
             try:
@@ -134,7 +139,6 @@ def parse_fundamental(source):
             
         for i in range(len(df)):
             indicator_name = str(df.iloc[i, 0]).lower()
-            
             if 'pe ratio' in indicator_name or 'per' in indicator_name:
                 fund_data['PER'] = get_latest_valid_number(df.iloc[i])
             elif 'return on equity' in indicator_name or 'roe' in indicator_name:
@@ -147,7 +151,7 @@ def parse_fundamental(source):
                 fund_data['Interest Coverage'] = get_latest_valid_number(df.iloc[i])
                 
         return fund_data
-    except Exception:
+    except Exception as e:
         return fund_data
 
 def create_sliding_window(X_data, y_data, close_prices, lookback=5):
@@ -191,6 +195,9 @@ def forecast_future_recursive(rfr_model, lstm_model, df, scaler, feature_cols, l
 
     return forecast_rfr_prices, forecast_lstm_prices
 
+# ==========================================
+# SCORING SYSTEM LOGIC
+# ==========================================
 def calculate_fundamental_score(fund_data):
     score = 0
     per = fund_data.get('PER', 15)
@@ -226,51 +233,21 @@ def get_label(score):
     elif score >= 45: return "Wajar"
     else: return "Jelek"
 
+# ==========================================
+# MAIN APP & UI
+# ==========================================
 st.title("Dashboard Prediksi dan Analisis Saham")
 st.markdown("Sektor Konsumen Primer Industri Makanan Olahan (BEI)")
 
-with st.expander("📊 Tabel Rekapitulasi Hasil Prediksi & Evaluasi Skripsi (Asli)", expanded=False):
-    st.markdown("Tabel di bawah ini menampilkan kompilasi hasil evaluasi metrik dan prediksi yang didapatkan dari perhitungan penelitian (Model Random Forest dan LSTM).")
-    
-    skripsi_csv = """Emiten,Harga Terakhir (Rp),Prediksi +1 Hari RFR,Prediksi +1 Hari LSTM,Prediksi +30 Hari RFR,Prediksi +30 Hari LSTM,RFR MAE(Ret),RFR RMSE(Ret),RFR MAE(Rp),RFR RMSE(Rp),LSTM MAE(Ret),LSTM RMSE(Ret),LSTM MAE(Rp),LSTM RMSE(Rp)
-ICBP,7125.0,7138.46,7124.11,6976.15,6082.03,0.01448,0.0193,115.18,152.92,0.01439,0.01948,113.86,152.82
-INDF,6600.0,6619.1,6724.59,6114.04,7371.88,0.01298,0.01687,92.52,118.63,0.01373,0.0176,98.38,124.94
-MYOR,1815.0,1805.8,1818.75,1753.93,1736.0,0.01734,0.02262,36.08,47.04,0.01748,0.02235,36.52,46.95
-CMRY,4790.0,4762.32,4759.18,4726.2,6687.2,0.0189,0.02599,96.34,133.47,0.01902,0.02583,96.1,130.27
-ULTJ,1500.0,1492.97,1505.97,1491.24,1680.81,0.01414,0.02053,20.92,30.73,0.01386,0.02033,20.45,30.29"""
-    
-    df_skripsi = pd.read_csv(io.StringIO(skripsi_csv))
-    
-    st.dataframe(
-        df_skripsi.style.format({
-            "Harga Terakhir (Rp)": "Rp {:,.0f}",
-            "Prediksi +1 Hari RFR": "Rp {:,.2f}",
-            "Prediksi +1 Hari LSTM": "Rp {:,.2f}",
-            "Prediksi +30 Hari RFR": "Rp {:,.2f}",
-            "Prediksi +30 Hari LSTM": "Rp {:,.2f}",
-            "RFR MAE(Ret)": "{:.5f}",
-            "RFR RMSE(Ret)": "{:.5f}",
-            "RFR MAE(Rp)": "Rp {:,.2f}",
-            "RFR RMSE(Rp)": "Rp {:,.2f}",
-            "LSTM MAE(Ret)": "{:.5f}",
-            "LSTM RMSE(Ret)": "{:.5f}",
-            "LSTM MAE(Rp)": "Rp {:,.2f}",
-            "LSTM RMSE(Rp)": "Rp {:,.2f}",
-        }),
-        use_container_width=True
-    )
-
+# --- FILTER DATA SKRIPSI ---
 with st.sidebar:
     st.header("Control Panel")
-    
     data_source = st.radio("Pilih Sumber Data:", ["Database Skripsi (ICBP, INDF, dkk)", "Unggah File Custom (CSV)"])
-    
     emiten_configs = []
     
     if data_source == "Database Skripsi (ICBP, INDF, dkk)":
         selected_emitens = st.multiselect("Pilih Emiten untuk Dianalisis/Bandingkan:", 
                                           ["Bandingkan 5 Emiten Skripsi", "ICBP", "INDF", "MYOR", "CMRY", "ULTJ"], default=["ICBP"])
-        
         if "Bandingkan 5 Emiten Skripsi" in selected_emitens:
             target_list = ["ICBP", "INDF", "MYOR", "CMRY", "ULTJ"]
         else:
@@ -285,6 +262,14 @@ with st.sidebar:
             })
     else:
         st.info("Pilih jumlah emiten yang ingin diunggah dan dibandingkan.")
+        
+        # TEMPLATE DOWNLOADS
+        tech_template = "Date,Open,High,Low,Close,Volume\n2024-01-01,1000,1050,990,1020,50000\n2024-01-02,1020,1060,1010,1050,60000\n"
+        fund_template = "Indikator;Q1 2024\nPE Ratio;15.5\nReturn on Equity;12.5\nReturn on Assets;5.2\nInterest Coverage;4.1\n"
+        
+        st.download_button("📥 Unduh Template Teknikal (CSV)", data=tech_template, file_name="template_teknikal.csv", mime="text/csv", help="Format riwayat harga saham harian.")
+        st.download_button("📥 Unduh Template Fundamental (CSV)", data=fund_template, file_name="template_fundamental.csv", mime="text/csv", help="Format indikator fundamental (pemisah titik koma).")
+        
         num_custom = st.number_input("Jumlah Emiten Custom:", min_value=1, max_value=5, value=1)
         for i in range(int(num_custom)):
             st.markdown(f"**Data Emiten {i+1}**")
@@ -301,10 +286,36 @@ with st.sidebar:
     st.markdown("---")
     model_choice = st.selectbox("Pilih Algoritma Model:", ["Bandingkan Kedua Model (RFR vs LSTM)", "Random Forest Regressor (RFR)", "Long Short Term Memory (LSTM)"])
     lookback = st.slider("Panjang Sliding Window (Hari):", min_value=3, max_value=15, value=5)
-    forecast_days = st.slider("Horizon Proyeksi (Hari):", min_value=1, max_value=30, value=30)
+    forecast_days = st.slider("Horizon Proyeksi (Hari):", min_value=1, max_value=30, value=7)
     
     run_button = st.button("Jalankan Analisis")
 
+# --- TABEL EVALUASI SKRIPSI (HANYA MUNCUL DI MODE DATABASE) ---
+if data_source == "Database Skripsi (ICBP, INDF, dkk)":
+    with st.expander("📊 Tabel Rekapitulasi Hasil Prediksi & Evaluasi Skripsi (Asli)"):
+        try:
+            eval_df = pd.read_csv(os.path.join("Model", "ringkasan_evaluasi.csv"))
+            # Formatting numeric columns for better readability
+            format_dict = {
+                'Harga Terakhir (Rp)': 'Rp {:,.2f}',
+                'Prediksi +1 Hari RFR': 'Rp {:,.2f}',
+                'Prediksi +1 Hari LSTM': 'Rp {:,.2f}',
+                'Prediksi +30 Hari RFR': 'Rp {:,.2f}',
+                'Prediksi +30 Hari LSTM': 'Rp {:,.2f}',
+                'RFR MAE(Ret)': '{:.5f}',
+                'RFR RMSE(Ret)': '{:.5f}',
+                'RFR MAE(Rp)': 'Rp {:,.2f}',
+                'RFR RMSE(Rp)': 'Rp {:,.2f}',
+                'LSTM MAE(Ret)': '{:.5f}',
+                'LSTM RMSE(Ret)': '{:.5f}',
+                'LSTM MAE(Rp)': 'Rp {:,.2f}',
+                'LSTM RMSE(Rp)': 'Rp {:,.2f}',
+            }
+            st.dataframe(eval_df.style.format(format_dict))
+        except Exception:
+            st.error("File ringkasan_evaluasi.csv tidak ditemukan di direktori lokal.")
+
+# --- FUNGSI PROSES EMITEN ---
 @st.cache_data(show_spinner=False)
 def process_emiten(config, model_choice, lookback, forecast_days):
     try:
@@ -383,15 +394,17 @@ def process_emiten(config, model_choice, lookback, forecast_days):
             "rfr_metrics": rfr_metrics, "lstm_metrics": lstm_metrics,
             "tech_score": tech_score, "fund_score": fund_score, "trend_pct": trend_pct
         }
-    except Exception:
+    except Exception as e:
+        print(e)
         return None
 
+# --- EKSEKUSI PROSES MAIN ---
 if run_button:
     if len(emiten_configs) == 0:
         st.warning("Silakan pilih emiten dari database atau unggah file custom terlebih dahulu.")
     else:
         results = []
-        with st.spinner("Memproses data analisis..."):
+        with st.spinner("Memproses data komparasi..."):
             for config in emiten_configs:
                 res = process_emiten(config, model_choice, lookback, forecast_days)
                 if res: results.append(res)
@@ -399,9 +412,9 @@ if run_button:
         if not results:
             st.error("Gagal memproses data. Pastikan format CSV sesuai.")
         else:
+            # 1. GRAFIK KOMPARASI GABUNGAN
             st.subheader(f"Grafik Proyeksi Tren ({forecast_days} Hari Kedepan)")
             fig, ax = plt.subplots(figsize=(12, 5))
-            
             colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
             
             for idx, res in enumerate(results):
@@ -428,17 +441,47 @@ if run_button:
             st.pyplot(fig)
             
             st.markdown("---")
-            st.subheader("Rincian Metrik & Penilaian")
             
+            # 2. RINGKASAN PERBANDINGAN FUNDAMENTAL (PUBLIC SUMMARY)
+            st.subheader("Ringkasan Perbandingan Fundamental")
+            fund_summary = []
+            for res in results:
+                fund_summary.append({
+                    "Emiten": res['name'],
+                    "Valuasi (PER)": f"{res['fund'].get('PER', 0):.2f}x",
+                    "Profitabilitas (ROE)": f"{res['fund'].get('ROE', 0)*100:.1f}%",
+                    "ROA": f"{res['fund'].get('ROA', 0)*100:.1f}%",
+                    "Interest Coverage": f"{res['fund'].get('Interest Coverage', 0):.2f}",
+                    "Skor Fundamental": res['fund_score'],
+                    "Status": get_label(res['fund_score'])
+                })
+            st.table(pd.DataFrame(fund_summary))
+            
+            # FITUR VIEWER DATA MENTAH (HANYA MUNCUL DI MODE DATABASE)
+            if data_source == "Database Skripsi (ICBP, INDF, dkk)":
+                with st.expander("📂 Lihat Data Mentah & Histori Fundamental"):
+                    for res in results:
+                        try:
+                            fund_path = os.path.join("data fundamental", f"Fundamental_{res['name']}.csv")
+                            if os.path.exists(fund_path):
+                                st.markdown(f"**Data Fundamental {res['name']}**")
+                                raw_fund = pd.read_csv(fund_path, sep=';')
+                                st.dataframe(raw_fund)
+                        except Exception:
+                            pass
+                            
+            st.markdown("---")
+
+            # 3. METRIK EVALUASI DAN KARTU SKOR TEKNIKAL
+            st.subheader("Rincian Metrik Prediksi & Evaluasi")
             for res in results:
                 st.markdown(f"### Emiten: {res['name']}")
                 col_skor, col_metrik = st.columns([1, 2])
                 
                 with col_skor:
                     t_lbl = get_label(res['tech_score'])
-                    f_lbl = get_label(res['fund_score'])
                     st.metric("Skor Teknikal", f"{res['tech_score']}/100", f"Status: {t_lbl}")
-                    st.metric("Skor Fundamental", f"{res['fund_score']}/100", f"Status: {f_lbl}")
+                    st.metric("Harga Terakhir", f"Rp {res['last_price']:,.0f}")
                     
                 with col_metrik:
                     eval_data = []
@@ -458,17 +501,9 @@ if run_button:
                         })
                     st.write("**Evaluasi Akurasi Prediksi:**")
                     st.table(pd.DataFrame(eval_data))
-                    
-                    fund_metrics = {
-                        "PER": f"{res['fund'].get('PER', 0):.2f}x",
-                        "ROE": f"{res['fund'].get('ROE', 0)*100:.1f}%",
-                        "ROA": f"{res['fund'].get('ROA', 0)*100:.1f}%",
-                        "Int. Coverage": f"{res['fund'].get('Interest Coverage', 0):.2f}"
-                    }
-                    st.write("**Indikator Fundamental:**")
-                    st.json(fund_metrics, expanded=False)
                 st.divider()
 
+            # 4. KESIMPULAN OTOMATIS
             st.subheader("Kesimpulan Analisis")
             results.sort(key=lambda x: x['tech_score'] + x['fund_score'], reverse=True)
             
@@ -497,7 +532,6 @@ if run_button:
                 txt_conclusion += f"   - Nilai Fundamental: {f_lbl} (Skor: {res['fund_score']} | PER: {res['fund'].get('PER', 0):.2f}x | ROE: {res['fund'].get('ROE', 0)*100:.1f}% | ROA: {res['fund'].get('ROA', 0)*100:.1f}% | Int. Coverage: {res['fund'].get('Interest Coverage', 0):.2f})\n\n"
 
             st.info(conclusion)
-            
             st.download_button(
                 label="📥 Unduh Hasil Kesimpulan (TXT)",
                 data=txt_conclusion,
@@ -505,6 +539,5 @@ if run_button:
                 mime="text/plain",
                 use_container_width=True
             )
-            
 else:
     st.info("Pilih parameter dari panel di sebelah kiri dan klik 'Jalankan Analisis'.")
