@@ -242,10 +242,10 @@ st.markdown("Sektor Konsumen Primer Industri Makanan Olahan (BEI)")
 # --- FILTER DATA SKRIPSI ---
 with st.sidebar:
     st.header("Control Panel")
-    data_source = st.radio("Pilih Sumber Data:", ["Database Skripsi (ICBP, INDF, dkk)", "Unggah File Custom (CSV)"])
+    data_source = st.radio("Pilih Sumber Data:", ["Dataset Skripsi", "Unggah File Custom (CSV)"])
     emiten_configs = []
     
-    if data_source == "Database Skripsi (ICBP, INDF, dkk)":
+    if data_source == "Dataset Skripsi":
         target_list = st.multiselect(
             "Pilih Emiten untuk Dianalisis/Bandingkan:", 
             ["ICBP", "INDF", "MYOR", "CMRY", "ULTJ"], 
@@ -289,8 +289,8 @@ with st.sidebar:
     
     run_button = st.button("Jalankan Analisis")
 
-# --- TABEL EVALUASI SKRIPSI (HANYA MUNCUL DI MODE DATABASE) ---
-if data_source == "Database Skripsi (ICBP, INDF, dkk)":
+# --- TABEL EVALUASI SKRIPSI (HANYA MUNCUL DI MODE DATASET) ---
+if data_source == "Dataset Skripsi":
     with st.expander("Tabel Evaluasi Skripsi"):
         try:
             eval_path = os.path.join("Model", "ringkasan_evaluasi.csv")
@@ -445,7 +445,7 @@ if run_button:
             
             st.markdown("---")
             
-            # 2. RINGKASAN PERBANDINGAN FUNDAMENTAL (PUBLIC SUMMARY)
+            # 2. RINGKASAN PERBANDINGAN FUNDAMENTAL
             st.subheader("Ringkasan Perbandingan Fundamental")
             fund_summary = []
             for res in results:
@@ -460,7 +460,6 @@ if run_button:
                 })
             st.table(pd.DataFrame(fund_summary))
             
-            # TAMBAHAN VISUALISASI GRAFIK FUNDAMENTAL
             st.markdown("**Grafik Visualisasi Indikator Fundamental**")
             fund_viz_df = pd.DataFrame({
                 'Emiten': [r['name'] for r in results],
@@ -482,8 +481,8 @@ if run_button:
                 st.write("Profitabilitas: Return on Assets (ROA)")
                 st.bar_chart(fund_viz_df['ROA (%)'])
             
-            # FITUR VIEWER DATA MENTAH (HANYA MUNCUL DI MODE DATABASE)
-            if data_source == "Database Skripsi (ICBP, INDF, dkk)":
+            # FITUR VIEWER DATA MENTAH (HANYA MUNCUL DI MODE DATASET)
+            if data_source == "Dataset Skripsi":
                 with st.expander("Lihat Data Mentah & Histori Fundamental"):
                     for res in results:
                         try:
@@ -515,19 +514,19 @@ if run_button:
                     if res['rfr_metrics']:
                         eval_data.append({
                             "Algoritma": "RFR",
-                            "MAE": f"{res['rfr_metrics'].get('mae_ret', 0):.5f}",
-                            "RMSE": f"{res['rfr_metrics'].get('rmse_ret', 0):.5f}",
-                            "MAE Rp": f"Rp {res['rfr_metrics']['mae_rp']:,.2f}",
-                            "RMSE Rp": f"Rp {res['rfr_metrics']['rmse_rp']:,.2f}",
+                            "MAE (Return)": f"{res['rfr_metrics'].get('mae_ret', 0):.5f}",
+                            "RMSE (Return)": f"{res['rfr_metrics'].get('rmse_ret', 0):.5f}",
+                            "MAE (Rp)": f"Rp {res['rfr_metrics']['mae_rp']:,.2f}",
+                            "RMSE (Rp)": f"Rp {res['rfr_metrics']['rmse_rp']:,.2f}",
                             f"Prediksi +{forecast_days}H": f"Rp {res['forecast_rfr'][-1]:,.0f}"
                         })
                     if res['lstm_metrics']:
                         eval_data.append({
                             "Algoritma": "LSTM",
-                            "MAE": f"{res['lstm_metrics'].get('mae_ret', 0):.5f}",
-                            "RMSE": f"{res['lstm_metrics'].get('rmse_ret', 0):.5f}",
-                            "MAE Rp": f"Rp {res['lstm_metrics']['mae_rp']:,.2f}",
-                            "RMSE Rp": f"Rp {res['lstm_metrics']['rmse_rp']:,.2f}",
+                            "MAE (Return)": f"{res['lstm_metrics'].get('mae_ret', 0):.5f}",
+                            "RMSE (Return)": f"{res['lstm_metrics'].get('rmse_ret', 0):.5f}",
+                            "MAE (Rp)": f"Rp {res['lstm_metrics']['mae_rp']:,.2f}",
+                            "RMSE (Rp)": f"Rp {res['lstm_metrics']['rmse_rp']:,.2f}",
                             f"Prediksi +{forecast_days}H": f"Rp {res['forecast_lstm'][-1]:,.0f}"
                         })
                     st.write("**Evaluasi Akurasi Prediksi:**")
@@ -540,27 +539,68 @@ if run_button:
             
             if len(results) > 1:
                 best_emiten = results[0]
-                conclusion = f"Berdasarkan analisis komparatif bobot skor teknikal (presisi model & tren) dan skor fundamental (valuasi & profitabilitas), **{best_emiten['name']}** menempati peringkat tertinggi.\n\n"
-                txt_conclusion = "KESIMPULAN ANALISIS KOMPARATIF\n" + "="*50 + "\n\n"
+                conclusion = f"Berdasarkan analisis komparatif yang membobotkan metrik teknikal dan rasio keuangan, emiten **{best_emiten['name']}** menempati peringkat tertinggi dengan profil fundamental dan tingkat presisi komputasi yang paling optimal.\n\n"
+                txt_conclusion = "RINGKASAN ANALISIS KOMPARATIF\n" + "="*50 + "\n\n"
                 
                 for i, res in enumerate(results):
                     t_lbl = get_label(res['tech_score'])
                     f_lbl = get_label(res['fund_score'])
                     conclusion += f"* **Peringkat {i+1} - {res['name']}**: Sinyal Teknikal **{t_lbl}** (Skor {res['tech_score']}), Fundamental **{f_lbl}** (Skor {res['fund_score']}).\n"
                     
-                    txt_conclusion += f"Peringkat {i+1}. Emiten: {res['name']}\n"
-                    txt_conclusion += f"   - Sinyal Teknikal  : {t_lbl} (Skor: {res['tech_score']})\n"
-                    txt_conclusion += f"   - Nilai Fundamental: {f_lbl} (Skor: {res['fund_score']} | PER: {res['fund'].get('PER', 0):.2f}x | ROE: {res['fund'].get('ROE', 0)*100:.1f}% | ROA: {res['fund'].get('ROA', 0)*100:.1f}% | Int. Coverage: {res['fund'].get('Interest Coverage', 0):.2f})\n\n"
+                    per = res['fund'].get('PER', 0)
+                    roe = res['fund'].get('ROE', 0) * 100
+                    icr = res['fund'].get('Interest Coverage', 0)
+                    
+                    if per <= 15: nar_per = "Valuasi saham tergolong murah (undervalued) dan berada pada tingkat harga yang atraktif secara fundamental."
+                    elif per <= 25: nar_per = "Valuasi berada pada rentang wajar (fair value). Harga saham mencerminkan nilai fundamental perusahaan secara proporsional."
+                    else: nar_per = "Valuasi saham tergolong mahal (overvalued), yang mengindikasikan kerentanan terhadap koreksi harga apabila terjadi pergeseran sentimen pasar."
+                    
+                    if roe > 15: nar_roe = "Tingkat profitabilitas sangat baik. Manajemen terbukti sangat efisien dalam mengelola ekuitas untuk menghasilkan laba bersih yang optimal."
+                    elif roe >= 5: nar_roe = "Kinerja profitabilitas berada pada tingkat yang stabil, namun masih memiliki ruang untuk peningkatan efisiensi operasional."
+                    else: nar_roe = "Kinerja profitabilitas tergolong rendah. Perusahaan dinilai kurang efisien dalam memaksimalkan penggunaan ekuitas."
+                        
+                    if icr > 100: nar_icr = "Kondisi likuiditas sangat tangguh dengan beban utang berbunga yang mendekati nol. Risiko gagal bayar sangat minim dan relatif kebal terhadap volatilitas ekonomi makro."
+                    elif icr > 6: nar_icr = "Kondisi keuangan perusahaan sangat sehat. Kemampuan untuk menutupi beban bunga dari laba operasional memadai dengan baik."
+                    elif icr >= 2: nar_icr = "Kemampuan menutupi beban utang berada pada tingkat yang cukup, namun memerlukan pengawasan ketat apabila terjadi fluktuasi laba operasional."
+                    else: nar_icr = "Struktur keuangan tergolong berisiko. Tingginya rasio beban utang membuat perusahaan rentan mengalami kesulitan likuiditas di tengah ketidakpastian ekonomi."
+                    
+                    txt_conclusion += f"Peringkat {i+1} | Emiten: {res['name']}\n"
+                    txt_conclusion += f"Skor Gabungan -> Teknikal: {res['tech_score']}/100 | Fundamental: {res['fund_score']}/100\n"
+                    txt_conclusion += "-"*50 + "\n"
+                    txt_conclusion += f"1. Valuasi Harga (PER {per:.2f}x): {nar_per}\n"
+                    txt_conclusion += f"2. Kemampuan Cetak Laba (ROE {roe:.1f}%): {nar_roe}\n"
+                    txt_conclusion += f"3. Keamanan Finansial (ICR {icr:.2f}): {nar_icr}\n\n"
+                    
             else:
                 res = results[0]
                 t_lbl = get_label(res['tech_score'])
                 f_lbl = get_label(res['fund_score'])
-                conclusion = f"Berdasarkan analisis performa, emiten **{res['name']}** mencatatkan Sinyal Teknikal **{t_lbl}** (Skor {res['tech_score']}) dengan estimasi tren {res['trend_pct']*100:.1f}%, dan Nilai Fundamental **{f_lbl}** (Skor {res['fund_score']} dengan PER {res['fund'].get('PER', 0):.2f}x).\n\n"
+                conclusion = f"Berdasarkan analisis performa tunggal, emiten **{res['name']}** mencatatkan Sinyal Teknikal **{t_lbl}** (Skor {res['tech_score']}), dan Nilai Fundamental **{f_lbl}** (Skor {res['fund_score']}).\n\n"
                 
-                txt_conclusion = "KESIMPULAN ANALISIS PREDIKTIF & FUNDAMENTAL\n" + "="*50 + "\n\n"
-                txt_conclusion += f"Emiten: {res['name']}\n"
-                txt_conclusion += f"   - Sinyal Teknikal  : {t_lbl} (Skor: {res['tech_score']})\n"
-                txt_conclusion += f"   - Nilai Fundamental: {f_lbl} (Skor: {res['fund_score']} | PER: {res['fund'].get('PER', 0):.2f}x | ROE: {res['fund'].get('ROE', 0)*100:.1f}% | ROA: {res['fund'].get('ROA', 0)*100:.1f}% | Int. Coverage: {res['fund'].get('Interest Coverage', 0):.2f})\n\n"
+                per = res['fund'].get('PER', 0)
+                roe = res['fund'].get('ROE', 0) * 100
+                icr = res['fund'].get('Interest Coverage', 0)
+                
+                if per <= 15: nar_per = "Valuasi saham tergolong murah (undervalued) dan atraktif secara fundamental."
+                elif per <= 25: nar_per = "Valuasi berada pada rentang wajar (fair value), mencerminkan nilai perusahaan yang proporsional."
+                else: nar_per = "Valuasi tergolong mahal (overvalued), memiliki probabilitas koreksi harga yang lebih tinggi."
+                
+                if roe > 15: nar_roe = "Tingkat profitabilitas sangat baik dan manajemen dinilai efisien."
+                elif roe >= 5: nar_roe = "Kinerja profitabilitas berada pada tingkat yang stabil."
+                else: nar_roe = "Kinerja profitabilitas rendah dan kurang efisien dalam mencetak laba bersih."
+                    
+                if icr > 100: nar_icr = "Likuiditas sangat kokoh dengan rasio utang mendekati nol. Risiko gagal bayar hampir tidak ada."
+                elif icr > 6: nar_icr = "Kondisi keuangan sehat dengan profil pembayaran utang yang kuat."
+                elif icr >= 2: nar_icr = "Kemampuan bayar utang memadai, namun membutuhkan kehati-hatian pada stabilitas laba."
+                else: nar_icr = "Beban utang tinggi, mengindikasikan risiko likuiditas pada saat kondisi ekonomi melemah."
+                
+                txt_conclusion = "RINGKASAN ANALISIS PREDIKTIF & FUNDAMENTAL\n" + "="*50 + "\n\n"
+                txt_conclusion += f"Emiten Fokus: {res['name']}\n"
+                txt_conclusion += f"Skor Gabungan -> Teknikal: {res['tech_score']}/100 | Fundamental: {res['fund_score']}/100\n"
+                txt_conclusion += "-"*50 + "\n"
+                txt_conclusion += f"1. Valuasi Harga (PER {per:.2f}x): {nar_per}\n"
+                txt_conclusion += f"2. Kemampuan Cetak Laba (ROE {roe:.1f}%): {nar_roe}\n"
+                txt_conclusion += f"3. Keamanan Finansial (ICR {icr:.2f}): {nar_icr}\n\n"
 
             st.info(conclusion)
             st.download_button(
