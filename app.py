@@ -291,7 +291,7 @@ with st.sidebar:
 
 # --- TABEL EVALUASI SKRIPSI (HANYA MUNCUL DI MODE DATABASE) ---
 if data_source == "Database Skripsi (ICBP, INDF, dkk)":
-    with st.expander("Tabel Rekapitulasi Hasil Prediksi & Evaluasi Skripsi (Asli)"):
+    with st.expander("Tabel Evaluasi Skripsi"):
         try:
             eval_path = os.path.join("Model", "ringkasan_evaluasi.csv")
             eval_df = pd.read_csv(eval_path)
