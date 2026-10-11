@@ -1,5 +1,6 @@
 import os
 import csv
+import traceback
 import joblib
 import numpy as np
 import pandas as pd
@@ -28,6 +29,9 @@ st.set_page_config(
 
 np.random.seed(42)
 tf.random.set_seed(42)
+
+# Jumlah epoch LSTM saat model dilatih ulang di dashboard (sama dengan main.py)
+LSTM_EPOCHS = 50
 
 # ==========================================
 # FUNGSI TEKNIKAL & DATA
@@ -76,10 +80,10 @@ def load_and_preprocess_source(source):
             try: row = next(csv.reader([line], skipinitialspace=True))
             except Exception: row = line.split(',')
         data_rows.append([str(x).strip() for x in row])
-        
+
     df = pd.DataFrame(data_rows)
     header_idx = next((i for i, row in enumerate(data_rows) if any(x and ('date' in str(x).lower() or 'tanggal' in str(x).lower()) for x in row)), -1)
-            
+
     if header_idx != -1:
         header = [str(x).replace('"', '').replace('*', '').strip().capitalize() for x in data_rows[header_idx]]
         header = [h if h else f"Col_{j}" for j, h in enumerate(header)]
@@ -111,49 +115,114 @@ def load_and_preprocess_source(source):
         if actual_col:
             df[actual_col] = pd.to_numeric(df[actual_col].astype(str).str.replace(',', '', regex=False).str.replace('-', '', regex=False).str.strip(), errors='coerce')
             if actual_col != col: df.rename(columns={actual_col: col}, inplace=True)
-                
+
     df = df.dropna(subset=['Close'])
     if len(df) < 20: return pd.DataFrame()
     for col in target_cols:
         if col in df.columns: df[col] = df[col].astype(float)
     return compute_technical_indicators(df)
 
-def get_latest_valid_number(row_series):
-    for val in row_series.values[1:]: 
-        v_str = str(val).strip().replace('%', '').replace(',', '')
-        if v_str.lower() not in ['n/a', 'nan', 'none', '']:
-            try:
-                return float(v_str)
-            except ValueError:
-                continue
-    return 0.0
+# ==========================================
+# DATA FUNDAMENTAL (BASIS TTM)
+# ==========================================
+# Format file: baris pertama berisi label kuartal (kolom pertama = kuartal terbaru),
+# lalu baris indikator (EPS, PE Ratio, Return on Equity, Return on Assets, Interest Coverage).
+# PER TTM            = harga akhir kuartal terbaru / jumlah EPS 4 kuartal terakhir
+#                      (harga akhir kuartal = PE Ratio kuartal terbaru x EPS kuartal terbaru)
+# ROE TTM, ROA TTM   = jumlah 4 kuartal terakhir (pendekatan nilai setahun)
+# Interest Coverage  = rata-rata 4 kuartal terakhir
+TTM_QUARTERS = 4
+
+def _read_fund_rows(source):
+    if isinstance(source, str):
+        if not os.path.exists(source): return []
+        with open(source, 'r', encoding='utf-8-sig', errors='replace') as f:
+            text = f.read()
+    else:
+        text = source.getvalue().decode('utf-8-sig', errors='replace')
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines: return []
+    first = lines[0]
+    if first.count('\t') >= first.count(';') and first.count('\t') > 0:
+        return [[c.strip() for c in ln.split('\t')] for ln in lines]
+    if ';' in first:
+        return [[c.strip() for c in ln.split(';')] for ln in lines]
+    return [[c.strip() for c in row] for row in csv.reader(lines)]
+
+def _to_float(s):
+    s = str(s).strip().replace('%', '').replace(',', '')
+    if s.lower() in ('', 'n/a', 'nan', 'none', '-'):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def _latest_quarters(cells, n=TTM_QUARTERS):
+    """Ambil n kuartal terbaru dari satu baris. Semuanya harus berupa angka, kalau tidak hasilnya None."""
+    vals = [_to_float(c) for c in cells[1:1 + n]]
+    if len(vals) < n or any(v is None for v in vals):
+        return None
+    return vals
 
 def parse_fundamental(source):
-    fund_data = {'PER': 15.0, 'ROE': 0.10, 'ROA': 0.05, 'Interest Coverage': 5.0}
+    fund = {'PER': None, 'ROE': None, 'ROA': None, 'Interest Coverage': None, 'Periode': None}
     try:
-        if isinstance(source, str):
-            if not os.path.exists(source): return fund_data
-            df = pd.read_csv(source, sep=';', header=None, engine='python')
-        else:
-            df = pd.read_csv(source, sep=';', header=None, engine='python')
-            
-        for i in range(len(df)):
-            indicator_name = str(df.iloc[i, 0]).lower()
-            if 'pe ratio' in indicator_name or 'per' in indicator_name:
-                fund_data['PER'] = get_latest_valid_number(df.iloc[i])
-            elif 'return on equity' in indicator_name or 'roe' in indicator_name:
-                val = get_latest_valid_number(df.iloc[i])
-                fund_data['ROE'] = val / 100 if val > 1 else val
-            elif 'return on assets' in indicator_name or 'roa' in indicator_name:
-                val = get_latest_valid_number(df.iloc[i])
-                fund_data['ROA'] = val / 100 if val > 1 else val
-            elif 'interest coverage' in indicator_name:
-                fund_data['Interest Coverage'] = get_latest_valid_number(df.iloc[i])
-                
-        return fund_data
-    except Exception as e:
-        return fund_data
+        rows = _read_fund_rows(source)
+        if not rows:
+            return fund
 
+        header = rows[0]
+        labels = [h for h in header[1:1 + TTM_QUARTERS] if h]
+        if len(labels) == TTM_QUARTERS:
+            fund['Periode'] = f"{labels[-1]} - {labels[0]}"
+
+        eps = pe = None
+        for cells in rows[1:]:
+            name = cells[0].strip().lower()
+            if name.startswith('eps'):
+                eps = _latest_quarters(cells)
+            elif name.startswith('pe ratio'):
+                pe = _latest_quarters(cells)
+            elif name.startswith('return on equity'):
+                q = _latest_quarters(cells)
+                if q: fund['ROE'] = sum(q) / 100
+            elif name.startswith('return on assets'):
+                q = _latest_quarters(cells)
+                if q: fund['ROA'] = sum(q) / 100
+            elif name.startswith('interest coverage'):
+                q = _latest_quarters(cells)
+                if q: fund['Interest Coverage'] = sum(q) / len(q)
+
+        if eps and pe:
+            eps_ttm = sum(eps)
+            harga_akhir_kuartal = pe[0] * eps[0]
+            if eps_ttm > 0 and harga_akhir_kuartal > 0:
+                fund['PER'] = harga_akhir_kuartal / eps_ttm
+        return fund
+    except Exception:
+        traceback.print_exc()
+        return fund
+
+def fmt_num(value, decimals=2, suffix=''):
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "n/a"
+    return f"{value:,.{decimals}f}{suffix}"
+
+def fmt_pct_ratio(value, decimals=2):
+    """value berupa rasio (0.1415 -> 14.15%)."""
+    if value is None:
+        return "n/a"
+    return f"{value * 100:,.{decimals}f}%"
+
+def fmt_ic(value):
+    if value is None:
+        return "n/a"
+    return "> 100x" if value > 100 else f"{value:,.2f}"
+
+# ==========================================
+# WINDOWING & PROYEKSI
+# ==========================================
 def create_sliding_window(X_data, y_data, close_prices, lookback=5):
     X_seq, y_seq, prev_close = [], [], []
     for i in range(lookback, len(X_data)):
@@ -162,11 +231,19 @@ def create_sliding_window(X_data, y_data, close_prices, lookback=5):
         prev_close.append(close_prices[i-1])
     return np.array(X_seq), np.array(y_seq), np.array(prev_close)
 
+def _extend_row(df_temp, next_price):
+    last_row = df_temp.iloc[-1].copy()
+    last_row['Close'] = next_price
+    # Sama dengan main.py: High dan Low ikut melebar agar indikator stokastik tetap valid
+    last_row['High'] = max(last_row['High'], next_price)
+    last_row['Low'] = min(last_row['Low'], next_price)
+    return pd.concat([df_temp, pd.DataFrame([last_row])], ignore_index=True)
+
 def forecast_future_recursive(rfr_model, lstm_model, df, scaler, feature_cols, lookback=5, forecast_steps=30):
     df_temp_rfr = df.copy()
     df_temp_lstm = df.copy()
     forecast_rfr_prices, forecast_lstm_prices = [], []
-    
+
     if rfr_model is not None:
         for _ in range(forecast_steps):
             df_temp_rfr = compute_technical_indicators(df_temp_rfr)
@@ -176,9 +253,7 @@ def forecast_future_recursive(rfr_model, lstm_model, df, scaler, feature_cols, l
             last_price = df_temp_rfr['Close'].iloc[-1]
             next_price = last_price * (1 + pred_ret)
             forecast_rfr_prices.append(next_price)
-            last_row = df_temp_rfr.iloc[-1].copy()
-            last_row['Close'] = next_price
-            df_temp_rfr = pd.concat([df_temp_rfr, pd.DataFrame([last_row])], ignore_index=True)
+            df_temp_rfr = _extend_row(df_temp_rfr, next_price)
 
     if lstm_model is not None:
         for _ in range(forecast_steps):
@@ -189,49 +264,85 @@ def forecast_future_recursive(rfr_model, lstm_model, df, scaler, feature_cols, l
             last_price = df_temp_lstm['Close'].iloc[-1]
             next_price = last_price * (1 + pred_ret)
             forecast_lstm_prices.append(next_price)
-            last_row = df_temp_lstm.iloc[-1].copy()
-            last_row['Close'] = next_price
-            df_temp_lstm = pd.concat([df_temp_lstm, pd.DataFrame([last_row])], ignore_index=True)
+            df_temp_lstm = _extend_row(df_temp_lstm, next_price)
 
     return forecast_rfr_prices, forecast_lstm_prices
 
 # ==========================================
-# SCORING SYSTEM LOGIC
+# RINGKASAN (KESIMPULAN) DESKRIPTIF
 # ==========================================
-def calculate_fundamental_score(fund_data):
-    score = 0
-    per = fund_data.get('PER', 15)
-    roe = fund_data.get('ROE', 0.10)
-    ic = fund_data.get('Interest Coverage', 5)
-    
-    if 0 < per <= 15: score += 40
-    elif 15 < per <= 25: score += 20
-    else: score += 10
-    
-    if roe > 0.15: score += 40
-    elif 0.05 <= roe <= 0.15: score += 20
-    else: score += 10
-        
-    if ic > 6: score += 20
-    elif 2 <= ic <= 6: score += 10
-    else: score += 5
-    return score
+# Tidak ada skor, ambang, atau label penilaian. Kesimpulan hanya merangkum angka yang sudah ada:
+# proyeksi tiap model dibandingkan harga terakhir, tingkat kesalahan (MAE return) hasil evaluasi,
+# dan rasio fundamental TTM sebagai pembanding deskriptif.
+def describe_forecast(label, forecast_price, last_price):
+    forecast_price = float(forecast_price)
+    last_price = float(last_price)
+    diff = forecast_price - last_price
+    diff_pct = diff / last_price
+    if diff > 0:
+        posisi = "di atas harga terakhir"
+    elif diff < 0:
+        posisi = "di bawah harga terakhir"
+    else:
+        posisi = "sama dengan harga terakhir"
+    return {
+        "label": label,
+        "price": forecast_price,
+        "diff": diff,
+        "diff_pct": diff_pct,
+        "posisi": posisi,
+        "sign": int(diff > 0) - int(diff < 0)
+    }
 
-def calculate_technical_score(mae_pct, trend_pct):
-    score = 0
-    if mae_pct <= 0.02: score += 50
-    elif 0.02 < mae_pct <= 0.05: score += 25
-    else: score += 10
-    
-    if trend_pct > 0.02: score += 50
-    elif -0.02 <= trend_pct <= 0.02: score += 25
-    else: score += 10
-    return score
+def build_summary(res, forecast_days):
+    last_price = res['last_price']
+    items = []
+    if res['forecast_rfr']:
+        items.append(describe_forecast("RFR", res['forecast_rfr'][-1], last_price))
+    if res['forecast_lstm']:
+        items.append(describe_forecast("LSTM", res['forecast_lstm'][-1], last_price))
 
-def get_label(score):
-    if score >= 70: return "Bagus"
-    elif score >= 45: return "Wajar"
-    else: return "Jelek"
+    if len(items) == 2:
+        kesepakatan = "searah" if items[0]['sign'] == items[1]['sign'] else "berbeda arah"
+    else:
+        kesepakatan = "-"
+
+    mae_parts = []
+    if res['rfr_metrics']:
+        mae_parts.append(f"RFR {res['rfr_metrics']['mae_ret'] * 100:.2f}%")
+    if res['lstm_metrics']:
+        mae_parts.append(f"LSTM {res['lstm_metrics']['mae_ret'] * 100:.2f}%")
+
+    fund = res['fund']
+    text = f"{res['name']}: harga terakhir Rp {last_price:,.0f} ({res['last_date']}). "
+    for it in items:
+        text += (f"Proyeksi {it['label']} {forecast_days} hari ke depan Rp {it['price']:,.0f} "
+                 f"({it['diff_pct'] * 100:+.2f}%, {it['posisi']}). ")
+    if kesepakatan == "searah":
+        text += "Kedua model memberi proyeksi yang searah terhadap harga terakhir. "
+    elif kesepakatan == "berbeda arah":
+        text += "Kedua model memberi proyeksi yang berbeda arah terhadap harga terakhir. "
+    if mae_parts:
+        text += f"MAE (return) hasil evaluasi data uji: {', '.join(mae_parts)}. "
+    periode = f" ({fund['Periode']})" if fund.get('Periode') else ""
+    text += (f"Sebagai pembanding deskriptif, rasio fundamental TTM{periode}: "
+             f"PER {fmt_num(fund['PER'], 2, 'x')}, ROE {fmt_pct_ratio(fund['ROE'])}, "
+             f"ROA {fmt_pct_ratio(fund['ROA'])}, interest coverage {fmt_ic(fund['Interest Coverage'])}.")
+
+    row = {
+        "Emiten": res['name'],
+        "Harga Terakhir": f"Rp {last_price:,.0f}",
+        "Tanggal Data Akhir": res['last_date'],
+    }
+    for it in items:
+        row[f"Proyeksi {it['label']} (+{forecast_days}H)"] = f"Rp {it['price']:,.0f} ({it['diff_pct'] * 100:+.2f}%)"
+    row["Kedua Model"] = kesepakatan
+    row["MAE Return"] = ", ".join(mae_parts) if mae_parts else "-"
+    row["PER TTM"] = fmt_num(fund['PER'], 2, 'x')
+    return text, row
+
+DISCLAIMER = ("Catatan: hasil ini merupakan proyeksi model dari data historis dan rasio fundamental sebagai pembanding "
+              "deskriptif. Hasil ini bukan rekomendasi investasi dan bukan jaminan arah harga.")
 
 # ==========================================
 # MAIN APP & UI
@@ -244,14 +355,14 @@ with st.sidebar:
     st.header("Control Panel")
     data_source = st.radio("Pilih Sumber Data:", ["Dataset Skripsi", "Unggah File Custom (CSV)"])
     emiten_configs = []
-    
+
     if data_source == "Dataset Skripsi":
         target_list = st.multiselect(
-            "Pilih Emiten untuk Dianalisis/Bandingkan:", 
-            ["ICBP", "INDF", "MYOR", "CMRY", "ULTJ"], 
+            "Pilih Emiten untuk Dianalisis/Bandingkan:",
+            ["ICBP", "INDF", "MYOR", "CMRY", "ULTJ"],
             default=["ICBP"]
         )
-            
+
         for ticker in target_list:
             emiten_configs.append({
                 "name": ticker,
@@ -261,14 +372,21 @@ with st.sidebar:
             })
     else:
         st.info("Pilih jumlah emiten yang ingin diunggah dan dibandingkan.")
-        
+
         # TEMPLATE DOWNLOADS
         tech_template = "Date,Open,High,Low,Close,Volume\n2024-01-01,1000,1050,990,1020,50000\n2024-01-02,1020,1060,1010,1050,60000\n"
-        fund_template = "Indikator;Q1 2024\nPE Ratio;15.5\nReturn on Equity;12.5\nReturn on Assets;5.2\nInterest Coverage;4.1\n"
-        
+        fund_template = (
+            "Dalam IDR;Q2 2026;Q1 2026;Q4 2025;Q3 2025\n"
+            "EPS (Quarter);100.00;90.00;110.00;95.00\n"
+            "PE Ratio (Quarter);15.00;16.00;14.00;15.50\n"
+            "Return on Assets (Quarter);2.00%;1.90%;2.10%;1.80%\n"
+            "Return on Equity (Quarter);4.00%;3.80%;4.20%;3.60%\n"
+            "Interest Coverage (Quarter);5.00;4.50;5.50;4.80\n"
+        )
+
         st.download_button("Unduh Template Teknikal (CSV)", data=tech_template, file_name="template_teknikal.csv", mime="text/csv", help="Format riwayat harga saham harian.")
-        st.download_button("Unduh Template Fundamental (CSV)", data=fund_template, file_name="template_fundamental.csv", mime="text/csv", help="Format indikator fundamental (pemisah titik koma).")
-        
+        st.download_button("Unduh Template Fundamental (CSV)", data=fund_template, file_name="template_fundamental.csv", mime="text/csv", help="Format data fundamental per kuartal (pemisah titik koma, kolom pertama = kuartal terbaru, minimal 4 kuartal).")
+
         num_custom = st.number_input("Jumlah Emiten Custom:", min_value=1, max_value=5, value=1)
         for i in range(int(num_custom)):
             st.markdown(f"**Data Emiten {i+1}**")
@@ -285,8 +403,8 @@ with st.sidebar:
     st.markdown("---")
     model_choice = st.selectbox("Pilih Algoritma Model:", ["Bandingkan Kedua Model (RFR vs LSTM)", "Random Forest Regressor (RFR)", "Long Short Term Memory (LSTM)"])
     lookback = st.slider("Panjang Sliding Window (Hari):", min_value=3, max_value=15, value=5)
-    forecast_days = st.slider("Horizon Proyeksi (Hari):", min_value=1, max_value=30, value=7)
-    
+    forecast_days = st.slider("Horizon Proyeksi (Hari):", min_value=1, max_value=30, value=30)
+
     run_button = st.button("Jalankan Analisis")
 
 # --- TABEL EVALUASI SKRIPSI (HANYA MUNCUL DI MODE DATASET) ---
@@ -321,28 +439,28 @@ def process_emiten(config, model_choice, lookback, forecast_days):
         df = load_and_preprocess_source(config["tech_source"])
         fund_data = parse_fundamental(config["fund_source"])
         if df.empty: return None
-        
+
         feature_cols = ['X1_Close_Return', 'X2_Volume_Return', 'X3_SMA_Ratio', 'X4_MACD_Hist', 'X5_RSI', 'X6_Bollinger_B', 'X7_Stochastic_K']
         X_raw = df[feature_cols].values
         y_raw = df['Y_Target_Return'].values
         close_raw = df['Close'].values
         train_size = int(len(df) * 0.8)
-        
+
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_raw[:train_size])
         X_test_scaled = scaler.transform(X_raw[train_size:])
-        
+
         X_train, y_train, _ = create_sliding_window(X_train_scaled, y_raw[:train_size], close_raw[:train_size], lookback)
         X_test, y_test, prev_close_test = create_sliding_window(X_test_scaled, y_raw[train_size:], close_raw[train_size:], lookback)
         actual_close_test = close_raw[train_size+lookback:]
-        
+
         X_train_rfr = X_train.reshape(X_train.shape[0], -1)
         X_test_rfr = X_test.reshape(X_test.shape[0], -1)
-        
+
         rfr_model, lstm_model = None, None
         train_rfr = model_choice in ["Bandingkan Kedua Model (RFR vs LSTM)", "Random Forest Regressor (RFR)"]
         train_lstm = model_choice in ["Bandingkan Kedua Model (RFR vs LSTM)", "Long Short Term Memory (LSTM)"]
-        
+
         if not config["is_custom"] and lookback == 5:
             rfr_path = os.path.join("Model", "saved_models", f"rfr_model_{config['name']}.joblib")
             lstm_path = os.path.join("Model", "saved_models", f"lstm_model_{config['name']}.keras")
@@ -352,53 +470,46 @@ def process_emiten(config, model_choice, lookback, forecast_days):
             if train_lstm and os.path.exists(lstm_path):
                 lstm_model = load_model(lstm_path)
                 train_lstm = False
-                
+
         if train_rfr:
             rfr_model = RandomForestRegressor(n_estimators=100, random_state=42)
             rfr_model.fit(X_train_rfr, y_train)
         if train_lstm:
             lstm_model = Sequential([LSTM(32, input_shape=(lookback, 7)), Dropout(0.1), Dense(1)])
             lstm_model.compile(optimizer=Adam(0.001), loss='mse')
-            lstm_model.fit(X_train, y_train, epochs=30, batch_size=16, verbose=0, shuffle=False)
-            
+            lstm_model.fit(X_train, y_train, epochs=LSTM_EPOCHS, batch_size=16, verbose=0, shuffle=False)
+
         rfr_metrics, lstm_metrics = {}, {}
-        
+
         if rfr_model is not None:
             rfr_pred = rfr_model.predict(X_test_rfr)
             pred_close = prev_close_test * (1 + rfr_pred)
             rfr_metrics['mae_ret'] = mean_absolute_error(y_test, rfr_pred)
             rfr_metrics['rmse_ret'] = np.sqrt(mean_squared_error(y_test, rfr_pred))
             rfr_metrics['mae_rp'] = mean_absolute_error(actual_close_test, pred_close)
-            rfr_metrics['mae_pct'] = rfr_metrics['mae_rp'] / np.mean(actual_close_test)
             rfr_metrics['rmse_rp'] = np.sqrt(mean_squared_error(actual_close_test, pred_close))
-            
+
         if lstm_model is not None:
             lstm_pred = lstm_model.predict(X_test, verbose=0).flatten()
             pred_close = prev_close_test * (1 + lstm_pred)
             lstm_metrics['mae_ret'] = mean_absolute_error(y_test, lstm_pred)
             lstm_metrics['rmse_ret'] = np.sqrt(mean_squared_error(y_test, lstm_pred))
             lstm_metrics['mae_rp'] = mean_absolute_error(actual_close_test, pred_close)
-            lstm_metrics['mae_pct'] = lstm_metrics['mae_rp'] / np.mean(actual_close_test)
             lstm_metrics['rmse_rp'] = np.sqrt(mean_squared_error(actual_close_test, pred_close))
-            
+
         forecast_rfr, forecast_lstm = forecast_future_recursive(rfr_model, lstm_model, df, scaler, feature_cols, lookback, forecast_days)
         last_price = df['Close'].iloc[-1]
-        
-        best_mae_pct = lstm_metrics.get('mae_pct', rfr_metrics.get('mae_pct', 0))
-        best_forecast = forecast_lstm if forecast_lstm else forecast_rfr
-        trend_pct = (best_forecast[-1] - last_price) / last_price if best_forecast else 0
-        
-        tech_score = calculate_technical_score(best_mae_pct, trend_pct)
-        fund_score = calculate_fundamental_score(fund_data)
-        
+
+        date_col = next((c for c in df.columns if 'date' in str(c).lower() or 'tanggal' in str(c).lower()), None)
+        last_date = df[date_col].iloc[-1].strftime('%d %b %Y') if date_col else "-"
+
         return {
-            "name": config["name"], "df": df, "fund": fund_data, "last_price": last_price,
+            "name": config["name"], "df": df, "fund": fund_data, "last_price": last_price, "last_date": last_date,
             "forecast_rfr": forecast_rfr, "forecast_lstm": forecast_lstm,
-            "rfr_metrics": rfr_metrics, "lstm_metrics": lstm_metrics,
-            "tech_score": tech_score, "fund_score": fund_score, "trend_pct": trend_pct
+            "rfr_metrics": rfr_metrics, "lstm_metrics": lstm_metrics
         }
-    except Exception as e:
-        print(e)
+    except Exception:
+        traceback.print_exc()
         return None
 
 # --- EKSEKUSI PROSES MAIN ---
@@ -411,7 +522,7 @@ if run_button:
             for config in emiten_configs:
                 res = process_emiten(config, model_choice, lookback, forecast_days)
                 if res: results.append(res)
-                
+
         if not results:
             st.error("Gagal memproses data. Pastikan format CSV sesuai.")
         else:
@@ -419,96 +530,99 @@ if run_button:
             st.subheader(f"Grafik Proyeksi Tren ({forecast_days} Hari Kedepan)")
             fig, ax = plt.subplots(figsize=(12, 5))
             colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-            
+
             for idx, res in enumerate(results):
                 c = colors[idx % len(colors)]
                 hist_subset = res['df']['Close'].tail(60).values
                 hist_x = np.arange(len(hist_subset))
                 future_x = np.arange(len(hist_subset) - 1, len(hist_subset) + forecast_days)
                 base_price = hist_subset[0]
-                
+
                 ax.plot(hist_x, (hist_subset/base_price - 1)*100, label=f"Historis {res['name']}", color=c, linewidth=2)
-                
+
                 if res['forecast_rfr']:
                     rfr_full = np.array([hist_subset[-1]] + res['forecast_rfr'])
                     ax.plot(future_x, (rfr_full/base_price - 1)*100, label=f"Proyeksi RFR {res['name']}", color=c, linestyle='--', linewidth=1.5)
-                    
+
                 if res['forecast_lstm']:
                     lstm_full = np.array([hist_subset[-1]] + res['forecast_lstm'])
                     ax.plot(future_x, (lstm_full/base_price - 1)*100, label=f"Proyeksi LSTM {res['name']}", color=c, linestyle=':', linewidth=1.5)
-                    
+
             ax.set_ylabel("Pergerakan Harga (%)", fontsize=10)
             ax.set_xlabel(f"Hari Bursa (60 Hari Terakhir + {forecast_days} Hari Kedepan)", fontsize=10)
             ax.grid(True, linestyle=':', alpha=0.6)
             ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
             st.pyplot(fig)
-            
+
             st.markdown("---")
-            
-            # 2. RINGKASAN PERBANDINGAN FUNDAMENTAL
-            st.subheader("Ringkasan Perbandingan Fundamental")
+
+            # 2. RINGKASAN PERBANDINGAN FUNDAMENTAL (TTM)
+            st.subheader("Ringkasan Perbandingan Fundamental (TTM)")
             fund_summary = []
             for res in results:
+                f = res['fund']
                 fund_summary.append({
                     "Emiten": res['name'],
-                    "Valuasi (PER)": f"{res['fund'].get('PER', 0):.2f}x",
-                    "Profitabilitas (ROE)": f"{res['fund'].get('ROE', 0)*100:.1f}%",
-                    "ROA": f"{res['fund'].get('ROA', 0)*100:.1f}%",
-                    "Interest Coverage": f"{res['fund'].get('Interest Coverage', 0):.2f}",
-                    "Skor Fundamental": res['fund_score'],
-                    "Status": get_label(res['fund_score'])
+                    "PER TTM": fmt_num(f['PER'], 2, 'x'),
+                    "ROE TTM": fmt_pct_ratio(f['ROE']),
+                    "ROA TTM": fmt_pct_ratio(f['ROA']),
+                    "Interest Coverage": fmt_ic(f['Interest Coverage']),
+                    "Periode TTM": f['Periode'] or "-"
                 })
             st.table(pd.DataFrame(fund_summary))
-            
+            st.caption("TTM = empat kuartal terakhir pada data fundamental. PER = harga akhir kuartal terbaru dibagi jumlah EPS empat kuartal; "
+                       "ROE dan ROA = jumlah empat kuartal (pendekatan nilai setahun); interest coverage = rata-rata empat kuartal. "
+                       "n/a berarti data tidak lengkap untuk dihitung.")
+
             st.markdown("**Grafik Visualisasi Indikator Fundamental**")
+            nan = float('nan')
             fund_viz_df = pd.DataFrame({
                 'Emiten': [r['name'] for r in results],
-                'PER (x)': [r['fund'].get('PER', 0) for r in results],
-                'ROE (%)': [r['fund'].get('ROE', 0) * 100 for r in results],
-                'ROA (%)': [r['fund'].get('ROA', 0) * 100 for r in results],
-                'Interest Coverage (x)': [r['fund'].get('Interest Coverage', 0) for r in results]
+                'PER TTM (x)': [r['fund']['PER'] if r['fund']['PER'] is not None else nan for r in results],
+                'ROE TTM (%)': [r['fund']['ROE'] * 100 if r['fund']['ROE'] is not None else nan for r in results],
+                'ROA TTM (%)': [r['fund']['ROA'] * 100 if r['fund']['ROA'] is not None else nan for r in results],
+                'Interest Coverage (x, maks. 100)': [min(r['fund']['Interest Coverage'], 100) if r['fund']['Interest Coverage'] is not None else nan for r in results]
             }).set_index('Emiten')
-            
+
             col_viz1, col_viz2 = st.columns(2)
             with col_viz1:
-                st.write("Valuasi: Price to Earning Ratio (PER)")
-                st.bar_chart(fund_viz_df['PER (x)'])
-                st.write("Kesehatan Kas: Interest Coverage Ratio")
-                st.bar_chart(fund_viz_df['Interest Coverage (x)'])
+                st.write("Valuasi: Price to Earning Ratio (PER) TTM")
+                st.bar_chart(fund_viz_df['PER TTM (x)'])
+                st.write("Kemampuan Membayar Bunga: Interest Coverage (nilai di atas 100 ditampilkan 100)")
+                st.bar_chart(fund_viz_df['Interest Coverage (x, maks. 100)'])
             with col_viz2:
-                st.write("Profitabilitas: Return on Equity (ROE)")
-                st.bar_chart(fund_viz_df['ROE (%)'])
-                st.write("Profitabilitas: Return on Assets (ROA)")
-                st.bar_chart(fund_viz_df['ROA (%)'])
-            
+                st.write("Profitabilitas: Return on Equity (ROE) TTM")
+                st.bar_chart(fund_viz_df['ROE TTM (%)'])
+                st.write("Profitabilitas: Return on Assets (ROA) TTM")
+                st.bar_chart(fund_viz_df['ROA TTM (%)'])
+
             # FITUR VIEWER DATA MENTAH (HANYA MUNCUL DI MODE DATASET)
             if data_source == "Dataset Skripsi":
                 with st.expander("Lihat Data Mentah & Histori Fundamental"):
                     for res in results:
                         try:
                             fund_path = os.path.join("data fundamental", f"Fundamental_{res['name']}.csv")
-                            if os.path.exists(fund_path):
+                            rows = _read_fund_rows(fund_path)
+                            if rows:
                                 st.markdown(f"**Data Fundamental {res['name']}**")
-                                raw_fund = pd.read_csv(fund_path, sep=';')
-                                st.dataframe(raw_fund)
+                                width = max(len(r) for r in rows)
+                                padded = [r + [''] * (width - len(r)) for r in rows]
+                                st.dataframe(pd.DataFrame(padded[1:], columns=padded[0]))
                         except Exception:
                             pass
-                            
+
             st.markdown("---")
 
-            # 3. METRIK EVALUASI DAN KARTU SKOR
+            # 3. METRIK EVALUASI
             st.subheader("Rincian Metrik Prediksi & Evaluasi")
             for res in results:
                 st.markdown(f"### Emiten: {res['name']}")
-                col_skor, col_metrik = st.columns([1, 2])
-                
-                with col_skor:
-                    t_lbl = get_label(res['tech_score'])
-                    f_lbl = get_label(res['fund_score'])
-                    st.metric("Skor Teknikal", f"{res['tech_score']}/100", f"Status: {t_lbl}")
-                    st.metric("Skor Fundamental", f"{res['fund_score']}/100", f"Status: {f_lbl}")
+                col_info, col_metrik = st.columns([1, 2])
+
+                with col_info:
                     st.metric("Harga Terakhir", f"Rp {res['last_price']:,.0f}")
-                    
+                    st.caption(f"Data harga berakhir pada {res['last_date']}")
+
                 with col_metrik:
                     eval_data = []
                     if res['rfr_metrics']:
@@ -533,76 +647,22 @@ if run_button:
                     st.table(pd.DataFrame(eval_data))
                 st.divider()
 
-            # 4. KESIMPULAN OTOMATIS
+            # 4. KESIMPULAN (RINGKASAN DESKRIPTIF)
             st.subheader("Kesimpulan Analisis")
-            results.sort(key=lambda x: x['tech_score'] + x['fund_score'], reverse=True)
-            
-            if len(results) > 1:
-                best_emiten = results[0]
-                conclusion = f"Berdasarkan analisis komparatif yang membobotkan metrik teknikal dan rasio keuangan, emiten **{best_emiten['name']}** menempati peringkat tertinggi dengan profil fundamental dan tingkat presisi komputasi yang paling optimal.\n\n"
-                txt_conclusion = "RINGKASAN ANALISIS KOMPARATIF\n" + "="*50 + "\n\n"
-                
-                for i, res in enumerate(results):
-                    t_lbl = get_label(res['tech_score'])
-                    f_lbl = get_label(res['fund_score'])
-                    conclusion += f"* **Peringkat {i+1} - {res['name']}**: Sinyal Teknikal **{t_lbl}** (Skor {res['tech_score']}), Fundamental **{f_lbl}** (Skor {res['fund_score']}).\n"
-                    
-                    per = res['fund'].get('PER', 0)
-                    roe = res['fund'].get('ROE', 0) * 100
-                    icr = res['fund'].get('Interest Coverage', 0)
-                    
-                    if per <= 15: nar_per = "Valuasi saham tergolong murah (undervalued) dan berada pada tingkat harga yang atraktif secara fundamental."
-                    elif per <= 25: nar_per = "Valuasi berada pada rentang wajar (fair value). Harga saham mencerminkan nilai fundamental perusahaan secara proporsional."
-                    else: nar_per = "Valuasi saham tergolong mahal (overvalued), yang mengindikasikan kerentanan terhadap koreksi harga apabila terjadi pergeseran sentimen pasar."
-                    
-                    if roe > 15: nar_roe = "Tingkat profitabilitas sangat baik. Manajemen terbukti sangat efisien dalam mengelola ekuitas untuk menghasilkan laba bersih yang optimal."
-                    elif roe >= 5: nar_roe = "Kinerja profitabilitas berada pada tingkat yang stabil, namun masih memiliki ruang untuk peningkatan efisiensi operasional."
-                    else: nar_roe = "Kinerja profitabilitas tergolong rendah. Perusahaan dinilai kurang efisien dalam memaksimalkan penggunaan ekuitas."
-                        
-                    if icr > 100: nar_icr = "Kondisi likuiditas sangat tangguh dengan beban utang berbunga yang mendekati nol. Risiko gagal bayar sangat minim dan relatif kebal terhadap volatilitas ekonomi makro."
-                    elif icr > 6: nar_icr = "Kondisi keuangan perusahaan sangat sehat. Kemampuan untuk menutupi beban bunga dari laba operasional memadai dengan baik."
-                    elif icr >= 2: nar_icr = "Kemampuan menutupi beban utang berada pada tingkat yang cukup, namun memerlukan pengawasan ketat apabila terjadi fluktuasi laba operasional."
-                    else: nar_icr = "Struktur keuangan tergolong berisiko. Tingginya rasio beban utang membuat perusahaan rentan mengalami kesulitan likuiditas di tengah ketidakpastian ekonomi."
-                    
-                    txt_conclusion += f"Peringkat {i+1} | Emiten: {res['name']}\n"
-                    txt_conclusion += f"Skor Gabungan -> Teknikal: {res['tech_score']}/100 | Fundamental: {res['fund_score']}/100\n"
-                    txt_conclusion += "-"*50 + "\n"
-                    txt_conclusion += f"1. Valuasi Harga (PER {per:.2f}x): {nar_per}\n"
-                    txt_conclusion += f"2. Kemampuan Cetak Laba (ROE {roe:.1f}%): {nar_roe}\n"
-                    txt_conclusion += f"3. Keamanan Finansial (ICR {icr:.2f}): {nar_icr}\n\n"
-                    
-            else:
-                res = results[0]
-                t_lbl = get_label(res['tech_score'])
-                f_lbl = get_label(res['fund_score'])
-                conclusion = f"Berdasarkan analisis performa tunggal, emiten **{res['name']}** mencatatkan Sinyal Teknikal **{t_lbl}** (Skor {res['tech_score']}), dan Nilai Fundamental **{f_lbl}** (Skor {res['fund_score']}).\n\n"
-                
-                per = res['fund'].get('PER', 0)
-                roe = res['fund'].get('ROE', 0) * 100
-                icr = res['fund'].get('Interest Coverage', 0)
-                
-                if per <= 15: nar_per = "Valuasi saham tergolong murah (undervalued) dan atraktif secara fundamental."
-                elif per <= 25: nar_per = "Valuasi berada pada rentang wajar (fair value), mencerminkan nilai perusahaan yang proporsional."
-                else: nar_per = "Valuasi tergolong mahal (overvalued), memiliki probabilitas koreksi harga yang lebih tinggi."
-                
-                if roe > 15: nar_roe = "Tingkat profitabilitas sangat baik dan manajemen dinilai efisien."
-                elif roe >= 5: nar_roe = "Kinerja profitabilitas berada pada tingkat yang stabil."
-                else: nar_roe = "Kinerja profitabilitas rendah dan kurang efisien dalam mencetak laba bersih."
-                    
-                if icr > 100: nar_icr = "Likuiditas sangat kokoh dengan rasio utang mendekati nol. Risiko gagal bayar hampir tidak ada."
-                elif icr > 6: nar_icr = "Kondisi keuangan sehat dengan profil pembayaran utang yang kuat."
-                elif icr >= 2: nar_icr = "Kemampuan bayar utang memadai, namun membutuhkan kehati-hatian pada stabilitas laba."
-                else: nar_icr = "Beban utang tinggi, mengindikasikan risiko likuiditas pada saat kondisi ekonomi melemah."
-                
-                txt_conclusion = "RINGKASAN ANALISIS PREDIKTIF & FUNDAMENTAL\n" + "="*50 + "\n\n"
-                txt_conclusion += f"Emiten Fokus: {res['name']}\n"
-                txt_conclusion += f"Skor Gabungan -> Teknikal: {res['tech_score']}/100 | Fundamental: {res['fund_score']}/100\n"
-                txt_conclusion += "-"*50 + "\n"
-                txt_conclusion += f"1. Valuasi Harga (PER {per:.2f}x): {nar_per}\n"
-                txt_conclusion += f"2. Kemampuan Cetak Laba (ROE {roe:.1f}%): {nar_roe}\n"
-                txt_conclusion += f"3. Keamanan Finansial (ICR {icr:.2f}): {nar_icr}\n\n"
+            summary_rows = []
+            txt_conclusion = "RINGKASAN HASIL PROYEKSI DAN PEMBANDING FUNDAMENTAL\n" + "=" * 50 + "\n\n"
+            for res in results:
+                text, row = build_summary(res, forecast_days)
+                summary_rows.append(row)
+                st.markdown(text)
+                txt_conclusion += text + "\n\n"
 
-            st.info(conclusion)
+            if len(summary_rows) > 1:
+                st.markdown("**Tabel ringkasan:**")
+                st.table(pd.DataFrame(summary_rows).fillna("-"))
+
+            st.info(DISCLAIMER)
+            txt_conclusion += DISCLAIMER + "\n"
             st.download_button(
                 label="Unduh Hasil Kesimpulan (TXT)",
                 data=txt_conclusion,
