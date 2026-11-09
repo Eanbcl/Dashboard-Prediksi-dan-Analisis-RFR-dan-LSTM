@@ -1,3 +1,6 @@
 venv/
 __pycache__/
 .DS_Store
+cek_*.py
+Model/plots/loss_*.png
+.env
